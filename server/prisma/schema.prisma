@@ -1,0 +1,539 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────── Identity & auth ─────────────
+
+model User {
+  id              String    @id @default(cuid())
+  /// lowercase, [a-z0-9_]{3,20}
+  username        String    @unique
+  /// lowercase
+  email           String    @unique
+  passwordHash    String
+  displayName     String
+  emailVerifiedAt DateTime?
+  timezone        String    @default("Europe/Istanbul")
+  xp              Int       @default(0)
+  level           Int       @default(1)
+  lastSeenAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  authSessions        AuthSession[]
+  passwordResets      PasswordResetToken[]
+  avatar              Avatar?
+  settings            UserSettings?
+  cosmetics           UserCosmetic[]
+  subjects            Subject[]
+  tasks               Task[]
+  note                PersonalNote?
+  studySessions       StudySession[]
+  segments            SessionSegment[]
+  ownedRooms          Room[]              @relation("RoomOwner")
+  memberships         RoomMember[]
+  roomBans            RoomBan[]
+  inviteLinks         RoomInviteLink[]
+  sentRoomInvites     RoomInvitation[]    @relation("RoomInvitationFrom")
+  receivedRoomInvites RoomInvitation[]    @relation("RoomInvitationTo")
+  roomEvents          RoomEvent[]
+  messages            ChatMessage[]
+  sentFriendReqs      FriendRequest[]     @relation("FriendRequestFrom")
+  receivedFriendReqs  FriendRequest[]     @relation("FriendRequestTo")
+  friendshipsA        Friendship[]        @relation("FriendshipA")
+  friendshipsB        Friendship[]        @relation("FriendshipB")
+  blocking            UserBlock[]         @relation("Blocker")
+  blockedBy           UserBlock[]         @relation("Blocked")
+  achievements        UserAchievement[]
+  xpTransactions      XpTransaction[]
+  notifications       Notification[]      @relation("NotificationUser")
+  actedNotifications  Notification[]      @relation("NotificationActor")
+
+  @@index([xp])
+}
+
+/// One row per refresh token. Rows sharing a familyId form one login session (device).
+/// Rotation: every refresh revokes the presented row and inserts a new one in the same family.
+/// Presenting an already-revoked token revokes the whole family (reuse detection).
+model AuthSession {
+  id         String    @id @default(cuid())
+  userId     String
+  familyId   String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([familyId])
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ───────────── Profile ─────────────
+
+model Avatar {
+  userId      String   @id
+  base        String
+  skinTone    String
+  hairStyle   String
+  hairColor   String
+  outfitStyle String
+  outfitColor String
+  accessory   String
+  deskItem    String
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// Unlocked non-default cosmetic items, key = "<slot>:<id>"
+model UserCosmetic {
+  userId     String
+  itemKey    String
+  source     String
+  unlockedAt DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, itemKey])
+}
+
+enum Visibility {
+  PUBLIC
+  FRIENDS
+  PRIVATE
+}
+
+model UserSettings {
+  userId               String     @id
+  profileVisibility    Visibility @default(PUBLIC)
+  presenceVisibility   Visibility @default(FRIENDS)
+  statsVisibility      Visibility @default(FRIENDS)
+  /// Friends may see which (visible) room you are in
+  showRoomToFriends    Boolean    @default(true)
+  showOnLeaderboard    Boolean    @default(true)
+  dailyGoalMinutes     Int        @default(120)
+  weeklyGoalMinutes    Int        @default(600)
+  pomodoroFocusMin     Int        @default(25)
+  pomodoroBreakMin     Int        @default(5)
+  pomodoroLongBreakMin Int        @default(15)
+  pomodoroLongEvery    Int        @default(4)
+  pomodoroAutoAdvance  Boolean    @default(false)
+  soundEnabled         Boolean    @default(true)
+  /// per-category sound preferences (soundEnabled is the master switch)
+  soundJoinLeave       Boolean    @default(true)
+  soundStudy           Boolean    @default(true)
+  soundBreak           Boolean    @default(true)
+  soundMention         Boolean    @default(true)
+  soundSubject         Boolean    @default(false)
+  notificationsEnabled Boolean    @default(false)
+  theme                String     @default("system")
+  user                 User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Subject {
+  id         String         @id @default(cuid())
+  userId     String
+  name       String
+  color      String         @default("#7fb2e5")
+  archivedAt DateTime?
+  createdAt  DateTime       @default(now())
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks      Task[]
+  sessions   StudySession[]
+  segments   SessionSegment[]
+
+  @@unique([userId, name])
+}
+
+model Task {
+  id        String         @id @default(cuid())
+  userId    String
+  subjectId String?
+  title     String
+  done      Boolean        @default(false)
+  doneAt    DateTime?
+  createdAt DateTime       @default(now())
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject   Subject?       @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  sessions  StudySession[]
+
+  @@index([userId, done])
+}
+
+model PersonalNote {
+  userId    String   @id
+  body      String   @default("")
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ───────────── Study sessions ─────────────
+
+enum SessionStatus {
+  ACTIVE
+  ON_BREAK
+  PAUSED
+  COMPLETED
+}
+
+enum SessionEndReason {
+  USER
+  AUTO_STALE
+  AUTO_MAX
+}
+
+enum SegmentKind {
+  FOCUS
+  BREAK
+}
+
+model StudySession {
+  id              String            @id @default(cuid())
+  userId          String
+  subjectId       String?
+  taskId          String?
+  /// Room the session was started in (rooms per segment live on SessionSegment)
+  roomId          String?
+  status          SessionStatus     @default(ACTIVE)
+  note            String?
+  /// Set to userId while the session is open, NULL once completed: guarantees at most
+  /// one open session per user at the database level (NULLs are not unique-checked).
+  openLock        String?           @unique
+  /// Idempotency key from the client "start" request
+  clientRequestId String?
+  startedAt       DateTime          @default(now())
+  endedAt         DateTime?
+  endReason       SessionEndReason?
+  /// Finalized on completion from FOCUS segments; never client supplied
+  focusSeconds    Int               @default(0)
+  breakSeconds    Int               @default(0)
+  lastHeartbeatAt DateTime          @default(now())
+  /// Last time the session state changed (used for paused auto-finish)
+  stateChangedAt  DateTime          @default(now())
+  pomodoroEnabled Boolean           @default(false)
+  pomodoroFocusMin Int?
+  pomodoroBreakMin Int?
+  pomodoroLongBreakMin Int?
+  pomodoroLongEvery Int?
+  pomodoroBlocks  Int               @default(0)
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject         Subject?          @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  task            Task?             @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  room            Room?             @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  segments        SessionSegment[]
+
+  @@unique([userId, clientRequestId])
+  @@index([userId, startedAt])
+  @@index([status, lastHeartbeatAt])
+}
+
+/// A contiguous interval of focus or break. Pauses are gaps between segments.
+/// Durations are always derived from server timestamps.
+model SessionSegment {
+  id        String       @id @default(cuid())
+  sessionId String
+  userId    String
+  roomId    String?
+  /// subject while this segment ran; changing subject mid-session splits the segment
+  subjectId String?
+  kind      SegmentKind
+  startedAt DateTime     @default(now())
+  endedAt   DateTime?
+  session   StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room      Room?        @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  subject   Subject?     @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, startedAt])
+  @@index([roomId, startedAt])
+  @@index([sessionId])
+}
+
+// ───────────── Rooms ─────────────
+
+enum RoomVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum RoomRole {
+  OWNER
+  MEMBER
+}
+
+enum TimerPhase {
+  IDLE
+  FOCUS
+  BREAK
+  LONG_BREAK
+}
+
+model Room {
+  id              String           @id @default(cuid())
+  name            String
+  description     String           @default("")
+  visibility      RoomVisibility   @default(PUBLIC)
+  passwordHash    String?
+  maxParticipants Int              @default(12)
+  category        String?
+  goalText        String?
+  goalMinutes     Int?
+  goalSetAt       DateTime?
+  theme           String           @default("cozy")
+  ownerId         String?
+  // shared pomodoro timer
+  timerEnabled    Boolean          @default(false)
+  focusMin        Int              @default(25)
+  breakMin        Int              @default(5)
+  longBreakMin    Int              @default(15)
+  longEvery       Int              @default(4)
+  timerPhase      TimerPhase       @default(IDLE)
+  timerPhaseStartedAt DateTime?
+  /// When paused, remaining seconds of the phase; null when running
+  timerPausedRemaining Int?
+  timerCycle      Int              @default(0)
+  timerVersion    Int              @default(0)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  archivedAt      DateTime?
+  owner           User?            @relation("RoomOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  members         RoomMember[]
+  bans            RoomBan[]
+  inviteLinks     RoomInviteLink[]
+  invitations     RoomInvitation[]
+  events          RoomEvent[]
+  messages        ChatMessage[]
+  sessions        StudySession[]
+  segments        SessionSegment[]
+
+  @@index([visibility, archivedAt, createdAt])
+}
+
+model RoomMember {
+  id            String   @id @default(cuid())
+  roomId        String
+  userId        String
+  role          RoomRole @default(MEMBER)
+  joinedAt      DateTime @default(now())
+  lastVisitedAt DateTime @default(now())
+  room          Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@index([userId, lastVisitedAt])
+}
+
+model RoomBan {
+  roomId    String
+  userId    String
+  createdAt DateTime @default(now())
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([roomId, userId])
+}
+
+model RoomInviteLink {
+  id          String    @id @default(cuid())
+  roomId      String
+  /// 128-bit random, base64url
+  code        String    @unique
+  createdById String
+  expiresAt   DateTime?
+  maxUses     Int?
+  uses        Int       @default(0)
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  room        Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  createdBy   User      @relation(fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+/// Direct invitation from a room member to a friend
+model RoomInvitation {
+  id        String           @id @default(cuid())
+  roomId    String
+  fromId    String
+  toId      String
+  status    InvitationStatus @default(PENDING)
+  createdAt DateTime         @default(now())
+  expiresAt DateTime
+  room      Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  from      User             @relation("RoomInvitationFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  to        User             @relation("RoomInvitationTo", fields: [toId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, toId])
+  @@index([toId, status])
+}
+
+model RoomEvent {
+  id          String   @id @default(cuid())
+  roomId      String
+  title       String
+  startsAt    DateTime
+  durationMin Int
+  createdById String
+  createdAt   DateTime @default(now())
+  room        Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  createdBy   User     @relation(fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([roomId, startsAt])
+}
+
+enum MessageKind {
+  TEXT
+  CHEER
+  SYSTEM
+}
+
+model ChatMessage {
+  id        String      @id @default(cuid())
+  roomId    String
+  userId    String
+  kind      MessageKind @default(TEXT)
+  body      String
+  createdAt DateTime    @default(now())
+  deletedAt DateTime?
+  room      Room        @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, createdAt])
+}
+
+// ───────────── Social ─────────────
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELED
+}
+
+model FriendRequest {
+  id          String              @id @default(cuid())
+  fromId      String
+  toId        String
+  status      FriendRequestStatus @default(PENDING)
+  createdAt   DateTime            @default(now())
+  respondedAt DateTime?
+  from        User                @relation("FriendRequestFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  to          User                @relation("FriendRequestTo", fields: [toId], references: [id], onDelete: Cascade)
+
+  @@unique([fromId, toId])
+  @@index([toId, status])
+}
+
+/// Undirected; always stored with userAId < userBId
+model Friendship {
+  userAId   String
+  userBId   String
+  createdAt DateTime @default(now())
+  userA     User     @relation("FriendshipA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB     User     @relation("FriendshipB", fields: [userBId], references: [id], onDelete: Cascade)
+
+  @@id([userAId, userBId])
+  @@index([userBId])
+}
+
+model UserBlock {
+  blockerId String
+  blockedId String
+  createdAt DateTime @default(now())
+  blocker   User     @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked   User     @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@id([blockerId, blockedId])
+  @@index([blockedId])
+}
+
+// ───────────── Gamification ─────────────
+
+model Achievement {
+  key         String            @id
+  name        String
+  description String
+  icon        String
+  xpReward    Int
+  users       UserAchievement[]
+}
+
+model UserAchievement {
+  userId         String
+  achievementKey String
+  unlockedAt     DateTime    @default(now())
+  user           User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievement    Achievement @relation(fields: [achievementKey], references: [key], onDelete: Cascade)
+
+  @@id([userId, achievementKey])
+}
+
+enum XpReason {
+  STUDY_SESSION
+  ACHIEVEMENT
+}
+
+/// Audit log of all XP. Unique (userId, reason, sourceId) makes every reward claimable once.
+model XpTransaction {
+  id        String   @id @default(cuid())
+  userId    String
+  amount    Int
+  reason    XpReason
+  sourceId  String
+  meta      Json?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, reason, sourceId])
+  @@index([userId, createdAt])
+}
+
+// ───────── Notifications ─────────
+
+enum NotificationType {
+  MENTION
+}
+
+/// Persistent notifications (delivered even if the user was offline). Ephemeral room
+/// activity toasts are not stored.
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  actorId   String?
+  roomId    String?
+  messageId String?
+  body      String
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+  user      User             @relation("NotificationUser", fields: [userId], references: [id], onDelete: Cascade)
+  actor     User?            @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  /// one notification per user per message
+  @@unique([userId, type, messageId])
+  @@index([userId, readAt, createdAt])
+}
